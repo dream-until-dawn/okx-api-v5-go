@@ -82,11 +82,11 @@ OKX 的 JSON 里所有数值都是字符串，且可能为空串。SDK 用 `Num`
 既不丢精度，也能方便转换：
 
 ```go
-p.Upl.Float64()   // 空串或非法值返回 0
-p.Upl.Float64E()  // 需要区分错误时用这个
-p.Ts.Time()       // 毫秒时间戳 -> time.Time
-p.Upl.String()    // 原始字符串
-okx.NumOf(1.5)    // 构造，用于下单参数
+pos.Upl.Float64()  // 空串或非法值都返回 0
+pos.Upl.Float64E() // 需要区分「空值」与「格式错误」时用这个
+pos.Upl.String()   // 原始字符串，不丢精度
+pos.UTime.Time()   // 毫秒时间戳 -> time.Time
+okx.NumOf(1.5)     // 由 float64 构造，用于下单参数
 ```
 
 ## 已覆盖的 REST 接口
@@ -218,10 +218,10 @@ default:
 
 ```go
 d, _ := balance.Detail("USDT")
-d.AvailBal  // 可动用余额，开新仓看它
-d.FrozenBal // 逐仓仓位占用的保证金计入这里
-d.IsoEq     // 逐仓仓位权益；Eq ≈ CashBal + IsoEq
-d.IsoUpl    // 逐仓未实现盈亏
+d.AvailBal.Float64()  // 可动用余额，开新仓看它
+d.FrozenBal.Float64() // 逐仓仓位占用的保证金计入这里
+d.IsoEq.Float64()     // 逐仓仓位权益；Eq ≈ CashBal + IsoEq
+d.IsoUpl.Float64()    // 逐仓未实现盈亏
 // d.MgnRatio / d.MaxLoan / d.Liab 在该模式下恒为空，别依赖
 ```
 
@@ -248,8 +248,15 @@ coins := contracts * inst.CtVal.Float64() * inst.CtMult.Float64()
 标记价判定，止损也设成 `mark` 更一致：
 
 ```go
-okx.OrderRequest{
-	// ...
+req := okx.OrderRequest{
+	InstID:  "ETH-USDT-SWAP",
+	TdMode:  okx.TdModeIsolated,
+	Side:    okx.SideBuy,
+	PosSide: okx.PosSideLong,
+	OrdType: okx.OrdTypeLimit,
+	Sz:      "1",
+	Px:      okx.NumOf(2400),
+
 	SlTriggerPx:     okx.NumOf(2000),
 	SlTriggerPxType: "mark", // last（默认）/ index / mark
 	SlOrdPx:         "-1",   // -1 表示市价止损
