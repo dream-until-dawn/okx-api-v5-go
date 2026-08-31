@@ -207,6 +207,74 @@ default:
   逐条检查 `OrderResult.OK()` 即可分辨哪几笔成功
 - `ErrNoData`：接口成功但 `data` 为空；`ErrNoCredentials`：调私有接口但没配 Key
 
+## 逐仓 + 永续 + 双向持仓的字段语义
+
+这是最常见的合约策略配置。下面几条是在真实账户上实测出来的，光看文档容易踩：
+
+**账户余额要读 `Details`，不要读顶层。** 在单币种保证金模式（`Account.Config` 的
+`acctLv=2`，绝大多数人的默认）下，`Balance` 顶层的 `AvailEq` / `MgnRatio` / `Upl` /
+`OrdFroz` / `NotionalUsd` 实测**全部返回空串**，只有 `TotalEq`、`IsoEq`、`UTime` 有值。
+真实数据在 `Balance.Details` 里逐币种给出：
+
+```go
+d, _ := balance.Detail("USDT")
+d.AvailBal  // 可动用余额，开新仓看它
+d.FrozenBal // 逐仓仓位占用的保证金计入这里
+d.IsoEq     // 逐仓仓位权益；Eq ≈ CashBal + IsoEq
+d.IsoUpl    // 逐仓未实现盈亏
+// d.MgnRatio / d.MaxLoan / d.Liab 在该模式下恒为空，别依赖
+```
+
+**持仓的保证金看 `Margin`，不是 `Imr`。** 逐仓下 `Position.Imr` 恒为空（那是全仓字段），
+仓位实际占用的保证金在 `Margin`。`PosCcy` 在 USDT 本位合约下也恒为空。
+
+**两套未实现盈亏，回测要选对。** `Upl` / `UplRatio` 按**标记价** `MarkPx` 计算，
+OKX 的强平判定用的就是它；`UplLastPx` / `UplRatioLastPx` 按**最新成交价** `Last` 计算。
+回测通常以成交价撮合，用后者口径才对得上（实测两者会差 0.03% 左右）。
+
+**下单量的单位是「张」。** 用 `Public.Instrument` 换算：
+
+```go
+inst, _ := client.Public.Instrument(ctx, "SWAP", "ETH-USDT-SWAP")
+// inst.CtVal=0.1 ETH/张，inst.LotSz=0.01 张，inst.MinSz=0.01 张
+coins := contracts * inst.CtVal.Float64() * inst.CtMult.Float64()
+```
+
+**双向持仓下 `PosSide` 必填。** 开多 `side=buy, posSide=long`，平多
+`side=sell, posSide=long`（或用 `Trade.ClosePosition`）。历史持仓
+`PositionHistory` 同时给 `Direction` 和 `PosSide`，两者都可用来区分多空。
+
+**止损建议触发在标记价上。** OKX 默认按最新价触发，容易被插针扫掉；永续的强平既然按
+标记价判定，止损也设成 `mark` 更一致：
+
+```go
+okx.OrderRequest{
+	// ...
+	SlTriggerPx:     okx.NumOf(2000),
+	SlTriggerPxType: "mark", // last（默认）/ index / mark
+	SlOrdPx:         "-1",   // -1 表示市价止损
+}
+```
+
+**逐仓的资金费用不走账户余额。** 账单里资金费（`Bill.Type == "8"`）的 `BalChg` 是 0，
+实际扣减记在 `PosBalChg`（仓位保证金变动）上。只累加 `BalChg` 会把资金费全部漏掉——
+实盘对账要同时看这两个字段。
+
+### 结构体收录范围
+
+字段是按「逐仓 / 永续 / 双向持仓」这个场景，用实盘与模拟盘的真实报文逐个核对后选定的，
+不是照抄文档。刻意未收录的有：期权希腊字母（`deltaBS`、`gammaPA` 等）、币币杠杆与借币
+（`liab`、`interest`、`maxLoan` 等）、现货与跟单理财（`spotUpl`、`stgyEq`、`twap` 等）、
+交割合约结算（`settledPnl`、`nonSettleAvgPx`）、组合保证金与对冲（`hedgedPos`、`delta`），
+这些在该场景下实测恒为空。
+
+需要它们时不用改 SDK，用泛型 `Do` 拿原始 JSON 即可：
+
+```go
+resp, _ := okx.Do[map[string]json.RawMessage](ctx, client, http.MethodGet,
+	"/api/v5/account/positions", url.Values{"instType": {"SWAP"}}, nil, true)
+```
+
 ## 注意事项
 
 - **下单前先在模拟盘验证**（`WithSimulated(true)`）。合约的 `Sz` 单位是**张**，不是币的数量，

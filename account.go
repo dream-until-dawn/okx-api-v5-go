@@ -9,21 +9,34 @@ import (
 type AccountService struct{ c *Client }
 
 // Balance 是账户整体资产信息。
+//
+// 注意：顶层的聚合字段（AdjEq / AvailEq / Imr / Mmr / MgnRatio / Upl / OrdFroz /
+// NotionalUsd 等）只在跨币种保证金、组合保证金模式下才有值。实测在最常见的
+// 单币种保证金模式（acctLv=2）下它们全部返回空串，真实数据在 [Balance.Details]
+// 里逐币种给出——逐仓永续的策略应当直接读 [BalanceDetail]。
 type Balance struct {
-	TotalEq     Num             `json:"totalEq"`     // 美元计价的账户总权益
-	AdjEq       Num             `json:"adjEq"`       // 美元计价的有效保证金
-	IsoEq       Num             `json:"isoEq"`       // 美元计价的逐仓仓位权益
-	OrdFroz     Num             `json:"ordFroz"`     // 挂单冻结保证金
-	Imr         Num             `json:"imr"`         // 初始保证金
-	Mmr         Num             `json:"mmr"`         // 维持保证金
-	MgnRatio    Num             `json:"mgnRatio"`    // 保证金率
-	NotionalUsd Num             `json:"notionalUsd"` // 美元计价的持仓名义价值
-	Upl         Num             `json:"upl"`         // 未实现盈亏
-	UTime       Num             `json:"uTime"`       // 更新时间，毫秒
-	Details     []BalanceDetail `json:"details"`     // 各币种明细
+	TotalEq            Num             `json:"totalEq"`            // 美元计价的账户总权益
+	AdjEq              Num             `json:"adjEq"`              // 美元计价的有效保证金
+	AvailEq            Num             `json:"availEq"`            // 美元计价的可用保证金
+	IsoEq              Num             `json:"isoEq"`              // 美元计价的逐仓仓位权益
+	OrdFroz            Num             `json:"ordFroz"`            // 挂单冻结保证金
+	Imr                Num             `json:"imr"`                // 初始保证金
+	Mmr                Num             `json:"mmr"`                // 维持保证金
+	MgnRatio           Num             `json:"mgnRatio"`           // 保证金率
+	NotionalUsd        Num             `json:"notionalUsd"`        // 美元计价的持仓名义价值
+	NotionalUsdForSwap Num             `json:"notionalUsdForSwap"` // 美元计价的永续合约持仓名义价值
+	Upl                Num             `json:"upl"`                // 未实现盈亏
+	UTime              Num             `json:"uTime"`              // 更新时间，毫秒
+	Details            []BalanceDetail `json:"details"`            // 各币种明细
 }
 
-// BalanceDetail 是单个币种的资产明细。
+// BalanceDetail 是单个币种的资产明细，逐仓永续策略主要看这里。
+//
+// 逐仓场景下的字段语义（实测于单币种保证金 + 逐仓 SWAP 账户）：
+//   - AvailBal / AvailEq 是真正可动用的余额，开新仓看它；
+//   - 逐仓仓位占用的保证金计入 FrozenBal，同时体现在 IsoEq 里；
+//   - Eq ≈ CashBal + IsoEq，IsoUpl 是逐仓仓位的未实现盈亏；
+//   - MgnRatio / MaxLoan / Liab / Interest 在该模式下恒为空，不要依赖。
 type BalanceDetail struct {
 	Ccy           string `json:"ccy"`           // 币种
 	Eq            Num    `json:"eq"`            // 币种总权益
@@ -65,38 +78,55 @@ func (s *AccountService) Balance(ctx context.Context, ccy ...string) (Balance, e
 
 // Position 是一个持仓。
 type Position struct {
-	InstType    string `json:"instType"`
-	InstID      string `json:"instId"`
-	PosID       string `json:"posId"`       // 持仓 ID
-	PosSide     string `json:"posSide"`     // long / short / net
-	MgnMode     string `json:"mgnMode"`     // cross（全仓）/ isolated（逐仓）
-	Pos         Num    `json:"pos"`         // 持仓数量（张）
-	AvailPos    Num    `json:"availPos"`    // 可平仓数量
-	PosCcy      string `json:"posCcy"`      // 仓位资产币种
-	Ccy         string `json:"ccy"`         // 保证金币种
-	AvgPx       Num    `json:"avgPx"`       // 开仓均价
-	BePx        Num    `json:"bePx"`        // 盈亏平衡价
-	MarkPx      Num    `json:"markPx"`      // 标记价格
-	LiqPx       Num    `json:"liqPx"`       // 预估强平价
-	IdxPx       Num    `json:"idxPx"`       // 指数价格
-	Last        Num    `json:"last"`        // 最新成交价
-	Lever       Num    `json:"lever"`       // 杠杆倍数
-	Margin      Num    `json:"margin"`      // 保证金余额（逐仓）
-	MgnRatio    Num    `json:"mgnRatio"`    // 维持保证金率
-	Imr         Num    `json:"imr"`         // 初始保证金（全仓）
-	Mmr         Num    `json:"mmr"`         // 维持保证金
-	Upl         Num    `json:"upl"`         // 未实现盈亏
-	UplRatio    Num    `json:"uplRatio"`    // 未实现收益率
-	RealizedPnl Num    `json:"realizedPnl"` // 已实现盈亏
-	Pnl         Num    `json:"pnl"`         // 平仓订单累计收益额
-	Fee         Num    `json:"fee"`         // 累计手续费
-	FundingFee  Num    `json:"fundingFee"`  // 累计资金费用
-	LiqPenalty  Num    `json:"liqPenalty"`  // 累计爆仓罚金
-	NotionalUsd Num    `json:"notionalUsd"` // 美元计价的持仓名义价值
-	Adl         Num    `json:"adl"`         // 自动减仓等级
-	CTime       Num    `json:"cTime"`       // 创建时间，毫秒
-	UTime       Num    `json:"uTime"`       // 更新时间，毫秒
-	TradeID     string `json:"tradeId"`
+	InstType string `json:"instType"`
+	InstID   string `json:"instId"`
+	PosID    string `json:"posId"`    // 持仓 ID
+	PosSide  string `json:"posSide"`  // long / short / net
+	MgnMode  string `json:"mgnMode"`  // cross（全仓）/ isolated（逐仓）
+	Pos      Num    `json:"pos"`      // 持仓数量（张）
+	AvailPos Num    `json:"availPos"` // 可平仓数量
+	PosCcy   string `json:"posCcy"`   // 仓位资产币种；USDT 本位合约恒为空
+	Ccy      string `json:"ccy"`      // 保证金币种
+	AvgPx    Num    `json:"avgPx"`    // 开仓均价
+	BePx     Num    `json:"bePx"`     // 盈亏平衡价
+	MarkPx   Num    `json:"markPx"`   // 标记价格
+	LiqPx    Num    `json:"liqPx"`    // 预估强平价
+	IdxPx    Num    `json:"idxPx"`    // 指数价格
+	Last     Num    `json:"last"`     // 最新成交价
+	Lever    Num    `json:"lever"`    // 杠杆倍数
+	Margin   Num    `json:"margin"`   // 保证金余额（逐仓）
+	MgnRatio Num    `json:"mgnRatio"` // 维持保证金率
+	Imr      Num    `json:"imr"`      // 初始保证金；仅全仓有值，逐仓恒为空，逐仓看 Margin
+	Mmr      Num    `json:"mmr"`      // 维持保证金
+	Upl      Num    `json:"upl"`      // 未实现盈亏（按标记价 MarkPx 计算）
+	UplRatio Num    `json:"uplRatio"` // 未实现收益率（按标记价计算）
+	// UplLastPx / UplRatioLastPx 按最新成交价 Last 计算。回测通常以成交价撮合，
+	// 用这两个字段和回测口径才对得上；OKX 的强平判定则依据按标记价的 Upl。
+	UplLastPx      Num `json:"uplLastPx"`
+	UplRatioLastPx Num `json:"uplRatioLastPx"`
+	RealizedPnl    Num `json:"realizedPnl"` // 已实现盈亏
+	Pnl            Num `json:"pnl"`         // 平仓订单累计收益额
+	Fee            Num `json:"fee"`         // 累计手续费
+	FundingFee     Num `json:"fundingFee"`  // 累计资金费用
+	LiqPenalty     Num `json:"liqPenalty"`  // 累计爆仓罚金
+	NotionalUsd    Num `json:"notionalUsd"` // 美元计价的持仓名义价值
+	Adl            Num `json:"adl"`         // 自动减仓等级
+	UsdPx          Num `json:"usdPx"`       // 保证金币种对美元的价格，用于折算 USD 口径
+	// CloseOrderAlgo 是挂在该仓位上的止盈止损委托；没有设置时为空数组。
+	CloseOrderAlgo []CloseOrderAlgo `json:"closeOrderAlgo"`
+	CTime          Num              `json:"cTime"` // 创建时间，毫秒
+	UTime          Num              `json:"uTime"` // 更新时间，毫秒
+	TradeID        string           `json:"tradeId"`
+}
+
+// CloseOrderAlgo 是附加在仓位上的止盈止损委托。
+type CloseOrderAlgo struct {
+	AlgoID          string `json:"algoId"`
+	SlTriggerPx     Num    `json:"slTriggerPx"`     // 止损触发价
+	SlTriggerPxType string `json:"slTriggerPxType"` // last / index / mark
+	TpTriggerPx     Num    `json:"tpTriggerPx"`     // 止盈触发价
+	TpTriggerPxType string `json:"tpTriggerPxType"` // last / index / mark
+	CloseFraction   Num    `json:"closeFraction"`   // 平仓比例
 }
 
 // Positions 查询当前持仓。三个参数均可选：instType 如 SWAP，instID 可传多个，
@@ -113,6 +143,7 @@ type PositionHistory struct {
 	PosID          string `json:"posId"`
 	MgnMode        string `json:"mgnMode"`
 	Direction      string `json:"direction"`  // long / short
+	PosSide        string `json:"posSide"`    // 持仓方向，双向持仓模式下用它区分多空
 	Type           string `json:"type"`       // 平仓类型：1 部分平仓 2 完全平仓 3 强平 ...
 	Lever          Num    `json:"lever"`      //
 	OpenAvgPx      Num    `json:"openAvgPx"`  // 开仓均价
@@ -171,6 +202,7 @@ func (s *AccountService) Config(ctx context.Context) (Config, error) {
 // LeverageInfo 是杠杆倍数信息。
 type LeverageInfo struct {
 	InstID  string `json:"instId"`
+	Ccy     string `json:"ccy"`
 	MgnMode string `json:"mgnMode"`
 	PosSide string `json:"posSide"`
 	Lever   Num    `json:"lever"`
@@ -236,23 +268,39 @@ func (s *AccountService) SetPositionMode(ctx context.Context, posMode string) (s
 	return v.PosMode, err
 }
 
-// Bill 是账单流水记录。
+// Bill 是账单流水记录，是核对手续费与资金费用的权威来源。
+//
+// 逐仓场景下有个容易踩的坑：资金费用（Type="8"）**不走账户余额**，
+// BalChg 为 0，实际扣减记在 PosBalChg（仓位保证金变动）上。只统计 BalChg
+// 会把全部资金费漏掉，逐仓永续的对账应同时看 BalChg 与 PosBalChg。
 type Bill struct {
-	BillID   string `json:"billId"`
-	InstID   string `json:"instId"`
-	InstType string `json:"instType"`
-	Type     string `json:"type"`    // 账单类型：1 划转 2 交易 8 资金费 ...
-	SubType  string `json:"subType"` // 账单子类型
-	Ccy      string `json:"ccy"`
-	Bal      Num    `json:"bal"`    // 账户层面的余额
-	BalChg   Num    `json:"balChg"` // 账户层面的余额变动
-	Sz       Num    `json:"sz"`     // 数量
-	Px       Num    `json:"px"`     // 价格
-	Pnl      Num    `json:"pnl"`    // 收益
-	Fee      Num    `json:"fee"`    // 手续费
-	OrdID    string `json:"ordId"`
-	PosBal   Num    `json:"posBal"`
-	Ts       Num    `json:"ts"`
+	BillID    string `json:"billId"`
+	InstID    string `json:"instId"`
+	InstType  string `json:"instType"`
+	Type      string `json:"type"`    // 账单类型：1 划转 2 交易 8 资金费 ...
+	SubType   string `json:"subType"` // 账单子类型
+	Ccy       string `json:"ccy"`
+	Bal       Num    `json:"bal"`    // 账户层面的余额
+	BalChg    Num    `json:"balChg"` // 账户层面的余额变动
+	Sz        Num    `json:"sz"`     // 数量
+	Px        Num    `json:"px"`     // 价格
+	Pnl       Num    `json:"pnl"`    // 收益
+	Fee       Num    `json:"fee"`    // 手续费
+	OrdID     string `json:"ordId"`
+	ClOrdID   string `json:"clOrdId"`
+	Tag       string `json:"tag"`
+	TradeID   string `json:"tradeId"`
+	MgnMode   string `json:"mgnMode"`   // cross / isolated
+	ExecType  string `json:"execType"`  // T taker / M maker
+	Interest  Num    `json:"interest"`  // 利息
+	FillIdxPx Num    `json:"fillIdxPx"` // 成交时的指数价格
+	PosBal    Num    `json:"posBal"`    // 仓位余额
+	PosBalChg Num    `json:"posBalChg"` // 仓位余额变动
+	From      string `json:"from"`      // 转出账户（划转类账单）
+	To        string `json:"to"`        // 转入账户（划转类账单）
+	Notes     string `json:"notes"`
+	FillTime  Num    `json:"fillTime"`
+	Ts        Num    `json:"ts"`
 }
 
 // Bills 查询最近 7 天的账单流水。instType / ccy / billType / subType 均为可选过滤条件。

@@ -30,6 +30,9 @@ type Instrument struct {
 	State     string `json:"state"`      // live / suspend / preopen / expired
 	MaxLmtSz  Num    `json:"maxLmtSz"`   // 限价单最大委托数量
 	MaxMktSz  Num    `json:"maxMktSz"`   // 市价单最大委托数量
+	// 策略委托的数量上限，下 [TradeService.PlaceAlgoOrder] 前应据此校验。
+	MaxTriggerSz Num `json:"maxTriggerSz"` // 计划委托单最大委托数量
+	MaxStopSz    Num `json:"maxStopSz"`    // 止盈止损单最大委托数量
 }
 
 // Instruments 获取产品列表。instType 必填（SPOT / SWAP / FUTURES / OPTION），

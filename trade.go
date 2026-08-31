@@ -63,11 +63,15 @@ type OrderRequest struct {
 	ReduceOnly bool   `json:"reduceOnly,omitempty"` // 是否只减仓
 	TgtCcy     string `json:"tgtCcy,omitempty"`     // 现货市价单委托数量单位：base_ccy / quote_ccy
 
-	// 下单附带的止盈止损（简化版，只支持一组）。
+	// 下单附带的止盈止损（简化版，只支持一组；要挂多组用 [TradeService.PlaceAlgoOrder]）。
 	TpTriggerPx Num `json:"tpTriggerPx,omitempty"` // 止盈触发价
 	TpOrdPx     Num `json:"tpOrdPx,omitempty"`     // 止盈委托价，-1 表示市价
 	SlTriggerPx Num `json:"slTriggerPx,omitempty"` // 止损触发价
 	SlOrdPx     Num `json:"slOrdPx,omitempty"`     // 止损委托价，-1 表示市价
+	// 触发价类型：last（最新价，OKX 默认）/ index（指数价）/ mark（标记价）。
+	// 永续合约的强平按标记价判定，止损通常也应设为 mark，避免被最新价的插针扫掉。
+	TpTriggerPxType string `json:"tpTriggerPxType,omitempty"`
+	SlTriggerPxType string `json:"slTriggerPxType,omitempty"`
 }
 
 // OrderResult 是下单 / 撤单 / 改单的返回结果。
@@ -171,38 +175,49 @@ func (s *TradeService) ClosePosition(ctx context.Context, req ClosePositionReque
 
 // Order 是订单详情。
 type Order struct {
-	InstType    string `json:"instType"`
-	InstID      string `json:"instId"`
-	OrdID       string `json:"ordId"`
-	ClOrdID     string `json:"clOrdId"`
-	Tag         string `json:"tag"`
-	Px          Num    `json:"px"`           // 委托价格
-	Sz          Num    `json:"sz"`           // 委托数量
-	OrdType     string `json:"ordType"`      // 订单类型
-	Side        string `json:"side"`         // buy / sell
-	PosSide     string `json:"posSide"`      // long / short / net
-	TdMode      string `json:"tdMode"`       // cross / isolated / cash
-	AccFillSz   Num    `json:"accFillSz"`    // 累计成交数量
-	FillPx      Num    `json:"fillPx"`       // 最新成交价
-	FillSz      Num    `json:"fillSz"`       // 最新成交数量
-	AvgPx       Num    `json:"avgPx"`        // 成交均价
-	State       string `json:"state"`        // live / partially_filled / filled / canceled
-	Lever       Num    `json:"lever"`        // 杠杆倍数
-	Fee         Num    `json:"fee"`          // 手续费（负数为支出）
-	FeeCcy      string `json:"feeCcy"`       // 手续费币种
-	Pnl         Num    `json:"pnl"`          // 收益
-	ReduceOnly  string `json:"reduceOnly"`   // 是否只减仓
-	Ccy         string `json:"ccy"`          //
-	Source      string `json:"source"`       //
-	Category    string `json:"category"`     // normal / twap / adl / full_liquidation ...
-	CancelSrc   string `json:"cancelSource"` // 撤单原因码
-	TpTriggerPx Num    `json:"tpTriggerPx"`  //
-	TpOrdPx     Num    `json:"tpOrdPx"`      //
-	SlTriggerPx Num    `json:"slTriggerPx"`  //
-	SlOrdPx     Num    `json:"slOrdPx"`      //
-	CTime       Num    `json:"cTime"`        // 创建时间，毫秒
-	UTime       Num    `json:"uTime"`        // 更新时间，毫秒
-	FillTime    Num    `json:"fillTime"`     // 最新成交时间，毫秒
+	InstType        string `json:"instType"`
+	InstID          string `json:"instId"`
+	OrdID           string `json:"ordId"`
+	ClOrdID         string `json:"clOrdId"`
+	Tag             string `json:"tag"`
+	Px              Num    `json:"px"`           // 委托价格
+	Sz              Num    `json:"sz"`           // 委托数量
+	OrdType         string `json:"ordType"`      // 订单类型
+	Side            string `json:"side"`         // buy / sell
+	PosSide         string `json:"posSide"`      // long / short / net
+	TdMode          string `json:"tdMode"`       // cross / isolated / cash
+	AccFillSz       Num    `json:"accFillSz"`    // 累计成交数量
+	FillPx          Num    `json:"fillPx"`       // 最新成交价
+	FillSz          Num    `json:"fillSz"`       // 最新成交数量
+	AvgPx           Num    `json:"avgPx"`        // 成交均价
+	State           string `json:"state"`        // live / partially_filled / filled / canceled
+	Lever           Num    `json:"lever"`        // 杠杆倍数
+	Fee             Num    `json:"fee"`          // 手续费（负数为支出）
+	FeeCcy          string `json:"feeCcy"`       // 手续费币种
+	Pnl             Num    `json:"pnl"`          // 收益
+	ReduceOnly      string `json:"reduceOnly"`   // 是否只减仓
+	Ccy             string `json:"ccy"`          //
+	Source          string `json:"source"`       //
+	Category        string `json:"category"`     // normal / twap / adl / full_liquidation ...
+	CancelSrc       string `json:"cancelSource"` // 撤单原因码
+	TpTriggerPx     Num    `json:"tpTriggerPx"`
+	TpOrdPx         Num    `json:"tpOrdPx"`
+	SlTriggerPx     Num    `json:"slTriggerPx"`
+	SlOrdPx         Num    `json:"slOrdPx"`
+	TpTriggerPxType string `json:"tpTriggerPxType"` // last / index / mark
+	SlTriggerPxType string `json:"slTriggerPxType"` // last / index / mark
+	TradeID         string `json:"tradeId"`         // 最新成交 ID
+	TgtCcy          string `json:"tgtCcy"`          // 现货市价单的委托数量单位
+	// AlgoID / AlgoClOrdID 在该订单由策略委托触发生成时非空，可回溯是哪一单触发的。
+	AlgoID      string `json:"algoId"`
+	AlgoClOrdID string `json:"algoClOrdId"`
+	// Rebate / RebateCcy 是返佣，和 Fee 一起才是这笔单的真实成本。
+	Rebate             Num    `json:"rebate"`
+	RebateCcy          string `json:"rebateCcy"`
+	CancelSourceReason string `json:"cancelSourceReason"` // 撤单原因的可读描述
+	CTime              Num    `json:"cTime"`              // 创建时间，毫秒
+	UTime              Num    `json:"uTime"`              // 更新时间，毫秒
+	FillTime           Num    `json:"fillTime"`           // 最新成交时间，毫秒
 }
 
 // Order 查询单个订单详情，ordID 与 clOrdID 至少填一个。
@@ -272,9 +287,9 @@ type Fill struct {
 	FillFwdPx  Num    `json:"fillFwdPx"`
 	FillMarkPx Num    `json:"fillMarkPx"`
 	SubType    string `json:"subType"`
+	FillIdxPx  Num    `json:"fillIdxPx"` // 成交时的指数价格
 	Ts         Num    `json:"ts"`
 	FillTime   Num    `json:"fillTime"`
-	FeeRate    Num    `json:"feeRate"`
 }
 
 // Fills 查询近 3 天的成交明细。instType / instID / ordID 均可选，limit 最大 100。
