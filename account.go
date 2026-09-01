@@ -313,3 +313,62 @@ func (s *AccountService) Bills(ctx context.Context, instType, ccy, billType, sub
 		setInt("limit", limit)
 	return request[Bill](ctx, s.c, http.MethodGet, "/api/v5/account/bills", q.values(), nil, true)
 }
+
+// TradeFee 是账户的手续费率。
+//
+// **费率是负数表示支出，正数表示返佣**（例如 taker "-0.0005" 即 0.05% 的成本）。
+//
+// 取值有个容易出错的地方：OKX 按保证金币种把费率分放在不同字段上——
+// USDT 保证金合约在 MakerU / TakerU，USDC 保证金合约在 MakerUSDC / TakerUSDC，
+// 币本位合约与现货才在 Maker / Taker。实测按 instFamily 查询 USDT 永续时，
+// Maker / Taker 返回的是空串。回测里读错字段会得到零手续费，PnL 会系统性偏乐观。
+// 用 [TradeFee.Rates] 按结算币种取，避免踩这个坑。
+type TradeFee struct {
+	Category  string `json:"category"`
+	InstType  string `json:"instType"`
+	Level     string `json:"level"`    // 手续费等级，如 Lv1
+	RuleType  string `json:"ruleType"` // normal / pre_market
+	Maker     Num    `json:"maker"`    // 现货、币本位合约的挂单费率
+	Taker     Num    `json:"taker"`    // 现货、币本位合约的吃单费率
+	MakerU    Num    `json:"makerU"`   // USDT 保证金合约的挂单费率
+	TakerU    Num    `json:"takerU"`   // USDT 保证金合约的吃单费率
+	MakerUSDC Num    `json:"makerUSDC"`
+	TakerUSDC Num    `json:"takerUSDC"`
+	Delivery  Num    `json:"delivery"` // 交割费率
+	Exercise  Num    `json:"exercise"` // 行权费率
+	Ts        Num    `json:"ts"`
+}
+
+// Rates 按结算币种取出该用的挂单 / 吃单费率。
+//
+// settleCcy 传合约的结算币种（USDT 永续传 "USDT"）。对应字段为空时会回退到
+// 通用的 Maker / Taker，因此返回空值只可能是交易所确实没给。
+func (f TradeFee) Rates(settleCcy string) (maker, taker Num) {
+	switch settleCcy {
+	case "USDT":
+		maker, taker = f.MakerU, f.TakerU
+	case "USDC":
+		maker, taker = f.MakerUSDC, f.TakerUSDC
+	default:
+		maker, taker = f.Maker, f.Taker
+	}
+	if maker.IsEmpty() {
+		maker = f.Maker
+	}
+	if taker.IsEmpty() {
+		taker = f.Taker
+	}
+	return maker, taker
+}
+
+// TradeFee 查询当前账户的手续费率。instType 必填（SPOT / SWAP / FUTURES / OPTION）；
+// instID、instFamily、uly 为可选过滤条件，注意 instID 必须与 instType 匹配，
+// 否则交易所会返回 50016。
+func (s *AccountService) TradeFee(ctx context.Context, instType, instID, instFamily, uly string) (TradeFee, error) {
+	q := newParams().
+		set("instType", instType).
+		set("instId", instID).
+		set("instFamily", instFamily).
+		set("uly", uly)
+	return requestOne[TradeFee](ctx, s.c, http.MethodGet, "/api/v5/account/trade-fee", q.values(), nil, true)
+}

@@ -111,3 +111,85 @@ func (s *PublicService) ServerTime(ctx context.Context) (Num, error) {
 	v, err := requestOne[ts](ctx, s.c, http.MethodGet, "/api/v5/public/time", nil, nil, false)
 	return v.Ts, err
 }
+
+// PositionTier 是一档仓位档位信息。
+//
+// 维持保证金率 MMR 随仓位大小分档跳变，不是常数。回测里若用固定 MMR 估算强平价，
+// 仓位一大就会算错——档位越高 MMR 越大、可用杠杆越低，强平价会比估计的更近。
+type PositionTier struct {
+	InstType     string `json:"instType"`
+	InstID       string `json:"instId"`
+	InstFamily   string `json:"instFamily"`
+	Uly          string `json:"uly"`
+	Tier         Num    `json:"tier"`         // 档位序号
+	MinSz        Num    `json:"minSz"`        // 该档的最小持仓量（张），不含
+	MaxSz        Num    `json:"maxSz"`        // 该档的最大持仓量（张），含
+	MMR          Num    `json:"mmr"`          // 维持保证金率
+	IMR          Num    `json:"imr"`          // 最低初始保证金率
+	MaxLever     Num    `json:"maxLever"`     // 该档最大可用杠杆
+	OptMgnFactor Num    `json:"optMgnFactor"` // 期权保证金系数
+	QuoteMaxLoan Num    `json:"quoteMaxLoan"`
+	BaseMaxLoan  Num    `json:"baseMaxLoan"`
+}
+
+// PositionTiers 查询仓位档位。instType 与 tdMode 必填，
+// 合约还需要 instFamily 或 uly（如 "ETH-USDT"）。
+func (s *PublicService) PositionTiers(ctx context.Context, instType, tdMode, instFamily, uly, instID string, tier string) ([]PositionTier, error) {
+	q := newParams().
+		set("instType", instType).
+		set("tdMode", tdMode).
+		set("instFamily", instFamily).
+		set("uly", uly).
+		set("instId", instID).
+		set("tier", tier)
+	return request[PositionTier](ctx, s.c, http.MethodGet, "/api/v5/public/position-tiers", q.values(), nil, false)
+}
+
+// TierFor 在档位表里找出容纳给定持仓量（张）的那一档。
+//
+// 档位区间是左开右闭：(MinSz, MaxSz]。找不到时第二个返回值为 false，
+// 通常意味着仓位超出了该品种的最高档上限。
+func TierFor(tiers []PositionTier, sz float64) (PositionTier, bool) {
+	for _, t := range tiers {
+		if sz > t.MinSz.Float64() && sz <= t.MaxSz.Float64() {
+			return t, true
+		}
+	}
+	return PositionTier{}, false
+}
+
+// OpenInterest 是持仓总量。
+type OpenInterest struct {
+	InstType string `json:"instType"`
+	InstID   string `json:"instId"`
+	OI       Num    `json:"oi"`    // 持仓量，张
+	OICcy    Num    `json:"oiCcy"` // 持仓量，币
+	OIUsd    Num    `json:"oiUsd"` // 持仓量，美元
+	Ts       Num    `json:"ts"`
+}
+
+// OpenInterests 获取持仓总量。instType 必填。
+func (s *PublicService) OpenInterests(ctx context.Context, instType, uly, instFamily, instID string) ([]OpenInterest, error) {
+	q := newParams().
+		set("instType", instType).
+		set("uly", uly).
+		set("instFamily", instFamily).
+		set("instId", instID)
+	return request[OpenInterest](ctx, s.c, http.MethodGet, "/api/v5/public/open-interest", q.values(), nil, false)
+}
+
+// PriceLimit 是当前的限价范围。回测里模拟挂单是否会被交易所拒绝时用得上。
+type PriceLimit struct {
+	InstType string `json:"instType"`
+	InstID   string `json:"instId"`
+	BuyLmt   Num    `json:"buyLmt"`  // 最高买价
+	SellLmt  Num    `json:"sellLmt"` // 最低卖价
+	Enabled  bool   `json:"enabled"` // 限价是否生效
+	Ts       Num    `json:"ts"`
+}
+
+// PriceLimit 获取指定产品的限价范围。
+func (s *PublicService) PriceLimit(ctx context.Context, instID string) (PriceLimit, error) {
+	q := newParams().set("instId", instID)
+	return requestOne[PriceLimit](ctx, s.c, http.MethodGet, "/api/v5/public/price-limit", q.values(), nil, false)
+}

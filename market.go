@@ -46,11 +46,12 @@ func (s *MarketService) Ticker(ctx context.Context, instID string) (Ticker, erro
 
 // Candle 是一根 K 线。OKX 原始返回是字符串数组，这里解析成结构体。
 type Candle struct {
-	Ts          int64   `json:"ts"`          // 开始时间，毫秒
-	Open        float64 `json:"open"`        // 开盘价
-	High        float64 `json:"high"`        // 最高价
-	Low         float64 `json:"low"`         // 最低价
-	Close       float64 `json:"close"`       // 收盘价
+	Ts    int64   `json:"ts"`    // 开始时间，毫秒
+	Open  float64 `json:"open"`  // 开盘价
+	High  float64 `json:"high"`  // 最高价
+	Low   float64 `json:"low"`   // 最低价
+	Close float64 `json:"close"` // 收盘价
+	// 以下三个成交量字段只有成交价 K 线有；标记价、指数 K 线恒为 0。
 	Vol         float64 `json:"vol"`         // 成交量（张 / 基础货币）
 	VolCcy      float64 `json:"volCcy"`      // 成交量（基础货币）
 	VolCcyQuote float64 `json:"volCcyQuote"` // 成交额（计价货币）
@@ -61,11 +62,15 @@ type Candle struct {
 func (c Candle) Time() time.Time { return time.UnixMilli(c.Ts) }
 
 // rawCandle 对应 OKX 返回的字符串数组形式。
+//
+// 有两种长度：成交价 K 线是 9 段（ts,o,h,l,c,vol,volCcy,volCcyQuote,confirm），
+// 标记价与指数 K 线是 6 段（ts,o,h,l,c,confirm）——它们没有成交量。
+// 两种格式的 confirm 都在最后一段，按下标 8 硬取会把 6 段格式的成交量读成 confirm。
 type rawCandle []string
 
 func (r rawCandle) toCandle() Candle {
 	get := func(i int) string {
-		if i < len(r) {
+		if i >= 0 && i < len(r) {
 			return r[i]
 		}
 		return ""
@@ -75,17 +80,14 @@ func (r rawCandle) toCandle() Candle {
 		return v
 	}
 	ts, _ := strconv.ParseInt(get(0), 10, 64)
-	return Candle{
-		Ts:          ts,
-		Open:        f(1),
-		High:        f(2),
-		Low:         f(3),
-		Close:       f(4),
-		Vol:         f(5),
-		VolCcy:      f(6),
-		VolCcyQuote: f(7),
-		Confirm:     get(8) == "1",
+	c := Candle{Ts: ts, Open: f(1), High: f(2), Low: f(3), Close: f(4)}
+	if len(r) >= 6 {
+		c.Confirm = get(len(r)-1) == "1"
 	}
+	if len(r) >= 9 {
+		c.Vol, c.VolCcy, c.VolCcyQuote = f(5), f(6), f(7)
+	}
+	return c
 }
 
 // CandlesRequest 是 K 线查询参数。
@@ -184,4 +186,65 @@ type Trade struct {
 func (s *MarketService) Trades(ctx context.Context, instID string, limit int) ([]Trade, error) {
 	q := newParams().set("instId", instID).setInt("limit", limit)
 	return request[Trade](ctx, s.c, http.MethodGet, "/api/v5/market/trades", q.values(), nil, false)
+}
+
+// MarkPriceCandles 获取标记价 K 线。
+//
+// OKX 的强平按标记价判定，不是成交价。回测里要建模爆仓就必须用这条序列，
+// 用成交价 K 线会在插针行情下得出偏乐观的结果。返回的 Candle 没有成交量。
+func (s *MarketService) MarkPriceCandles(ctx context.Context, req CandlesRequest) ([]Candle, error) {
+	return s.candles(ctx, "/api/v5/market/mark-price-candles", req)
+}
+
+// HistoryMarkPriceCandles 获取更久远的标记价历史 K 线。
+func (s *MarketService) HistoryMarkPriceCandles(ctx context.Context, req CandlesRequest) ([]Candle, error) {
+	return s.candles(ctx, "/api/v5/market/history-mark-price-candles", req)
+}
+
+// IndexCandles 获取指数 K 线。instID 用现货形式，如 "ETH-USDT"。返回的 Candle 没有成交量。
+func (s *MarketService) IndexCandles(ctx context.Context, req CandlesRequest) ([]Candle, error) {
+	return s.candles(ctx, "/api/v5/market/index-candles", req)
+}
+
+// HistoryIndexCandles 获取更久远的指数历史 K 线。
+func (s *MarketService) HistoryIndexCandles(ctx context.Context, req CandlesRequest) ([]Candle, error) {
+	return s.candles(ctx, "/api/v5/market/history-index-candles", req)
+}
+
+// IndexTicker 是指数行情。
+type IndexTicker struct {
+	InstID  string `json:"instId"`
+	IdxPx   Num    `json:"idxPx"` // 最新指数价格
+	High24h Num    `json:"high24h"`
+	Low24h  Num    `json:"low24h"`
+	Open24h Num    `json:"open24h"`
+	SodUtc0 Num    `json:"sodUtc0"`
+	SodUtc8 Num    `json:"sodUtc8"`
+	Ts      Num    `json:"ts"`
+}
+
+// IndexTickers 获取指数行情。instID 与 quoteCcy 二选一，instID 形如 "ETH-USDT"。
+func (s *MarketService) IndexTickers(ctx context.Context, quoteCcy, instID string) ([]IndexTicker, error) {
+	q := newParams().set("quoteCcy", quoteCcy).set("instId", instID)
+	return request[IndexTicker](ctx, s.c, http.MethodGet, "/api/v5/market/index-tickers", q.values(), nil, false)
+}
+
+// IndexTicker 获取单个指数行情。
+func (s *MarketService) IndexTicker(ctx context.Context, instID string) (IndexTicker, error) {
+	q := newParams().set("instId", instID)
+	return requestOne[IndexTicker](ctx, s.c, http.MethodGet, "/api/v5/market/index-tickers", q.values(), nil, false)
+}
+
+// HistoryTrades 获取历史逐笔成交，用于 tick 级回测。
+//
+// 分页有两种方式，由 method 选择："1" 按 tradeId、"2" 按时间戳（默认）；
+// after / before 的含义随之变化，after 取更旧的数据。limit 最大 100。
+func (s *MarketService) HistoryTrades(ctx context.Context, instID, after, before, method string, limit int) ([]Trade, error) {
+	q := newParams().
+		set("instId", instID).
+		set("after", after).
+		set("before", before).
+		set("type", method).
+		setInt("limit", limit)
+	return request[Trade](ctx, s.c, http.MethodGet, "/api/v5/market/history-trades", q.values(), nil, false)
 }

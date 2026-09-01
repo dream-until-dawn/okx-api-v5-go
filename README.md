@@ -91,11 +91,11 @@ okx.NumOf(1.5)     // 由 float64 构造，用于下单参数
 
 ## 已覆盖的 REST 接口
 
-**行情 `client.Market`**：`Tickers` / `Ticker` / `Candles` / `HistoryCandles` / `Books` / `Trades`
+**行情 `client.Market`**：`Tickers` / `Ticker` / `Candles` / `HistoryCandles` / `MarkPriceCandles` / `HistoryMarkPriceCandles` / `IndexCandles` / `HistoryIndexCandles` / `IndexTicker` / `IndexTickers` / `Books` / `Trades` / `HistoryTrades` / `CandleHistory` / `EachCandlePage`
 
-**公共数据 `client.Public`**：`Instruments` / `Instrument` / `MarkPrices` / `FundingRate` / `FundingRateHistory` / `ServerTime`
+**公共数据 `client.Public`**：`Instruments` / `Instrument` / `MarkPrices` / `FundingRate` / `FundingRateHistory` / `FundingRateHistoryAll` / `PositionTiers` / `OpenInterests` / `PriceLimit` / `ServerTime`
 
-**账户 `client.Account`**：`Balance` / `Positions` / `PositionsHistory` / `Config` / `LeverageInfo` / `SetLeverage` / `MaxSize` / `MaxAvailSize` / `SetPositionMode` / `Bills`
+**账户 `client.Account`**：`Balance` / `Positions` / `PositionsHistory` / `Config` / `LeverageInfo` / `SetLeverage` / `MaxSize` / `MaxAvailSize` / `SetPositionMode` / `Bills` / `TradeFee`
 
 **交易 `client.Trade`**：`PlaceOrder` / `PlaceOrders` / `CancelOrder` / `CancelOrders` / `AmendOrder` / `ClosePosition` / `Order` / `PendingOrders` / `OrdersHistory` / `OrdersHistoryArchive` / `Fills` / `FillsHistory` / `PlaceAlgoOrder` / `CancelAlgoOrders` / `PendingAlgoOrders` / `AlgoOrdersHistory`
 
@@ -281,6 +281,100 @@ req := okx.OrderRequest{
 resp, _ := okx.Do[map[string]json.RawMessage](ctx, client, http.MethodGet,
 	"/api/v5/account/positions", url.Values{"instType": {"SWAP"}}, nil, true)
 ```
+
+## 回测场景
+
+回测的成败取决于成本和强平模型是否真实。下面几个是实测踩出来的要点。
+
+### 手续费：别读错字段
+
+OKX 按保证金币种把费率放在不同字段里。实测按 `instFamily` 查 USDT 永续时，
+`maker` / `taker` 返回的是**空串**，真实费率在 `makerU` / `takerU`。直接读前者
+会得到零手续费，回测 PnL 会系统性偏乐观。用 `Rates` 按结算币种取：
+
+```go
+fee, _ := client.Account.TradeFee(ctx, "SWAP", "", "ETH-USDT", "")
+maker, taker := fee.Rates("USDT") // -0.0002 / -0.0005（负数表示支出）
+```
+
+### 强平：维持保证金率是分档跳变的
+
+`MMR` 不是常数，随仓位大小分档。实测 ETH-USDT-SWAP 共 99 档，
+第 1 档 `mmr=0.004`、最大杠杆 100，第 22 档 `mmr=0.1025`、最大杠杆只剩 8.69——
+**相差 25 倍**。用固定 MMR 估算强平价，仓位一大就会严重偏离：
+
+```go
+tiers, _ := client.Public.PositionTiers(ctx, "SWAP", okx.TdModeIsolated, "ETH-USDT", "", "", "")
+if tier, ok := okx.TierFor(tiers, 6000); ok { // 6000 张
+	fmt.Println(tier.MMR, tier.MaxLever) // 0.005 66.66
+}
+```
+
+### 强平判定用的是标记价，不是成交价
+
+回测建模爆仓要用标记价序列，否则插针行情下会得出偏乐观的结果：
+
+```go
+marks, _ := client.Market.CandleHistory(ctx, okx.HistoryRequest{
+	InstID: "ETH-USDT-SWAP",
+	Bar:    "1m",
+	Source: okx.CandleSourceMark, // 标记价
+	Begin:  begin,
+})
+```
+
+标记价与指数 K 线**没有成交量**（交易所只返回 6 个字段），`Vol` 恒为 0。
+
+### 拉长周期历史数据
+
+单页上限 300 根，拉一年 1 分钟线需要约 1750 次请求。`CandleHistory` 会自动翻页、
+去重、按时间**正序**返回，并在页间留出间隔避免限频：
+
+```go
+candles, err := client.Market.CandleHistory(ctx, okx.HistoryRequest{
+	InstID: "ETH-USDT-SWAP",
+	Bar:    "1m",
+	Begin:  time.Now().AddDate(0, 0, -30).UnixMilli(),
+	End:    time.Now().UnixMilli(), // 不含
+})
+```
+
+一年的 1 分钟线有 50 多万根、上百兆内存。不想全部驻留时用流式版本，
+回调拿到的每一页都已是正序，返回 `false` 即可提前停止：
+
+```go
+req := okx.HistoryRequest{InstID: "ETH-USDT-SWAP", Bar: "1m", Begin: begin}
+
+err := client.Market.EachCandlePage(ctx, req, func(page []okx.Candle) bool {
+	for _, k := range page { // 每一页都已是正序
+		engine.OnBar(k)
+	}
+	return true
+})
+```
+
+默认会剔除尚未收线的 K 线（`Confirm` 为 false），否则序列最后一根是残缺的；
+需要保留时设 `IncludeUnclosed: true`。`MaxPages` 可以在参数写错时兜底。
+
+### 资金费用必须计入
+
+永续每 8 小时结算一次资金费，持仓过夜的策略不计入会高估收益。
+实测 ETH-USDT-SWAP 近 30 天累计资金费率 **0.4937%**——对多头是实打实的成本：
+
+```go
+rates, _ := client.Public.FundingRateHistoryAll(ctx, "ETH-USDT-SWAP",
+	time.Now().AddDate(0, 0, -30).UnixMilli(), 0, 0)
+```
+
+同时注意逐仓下资金费**不走账户余额**，账单里 `BalChg` 是 0、实际扣在 `PosBalChg` 上
+（详见上一节）。
+
+### 其他可用输入
+
+`Public.OpenInterests`（持仓量）、`Public.PriceLimit`（限价范围，可模拟挂单被拒）、
+`Market.HistoryTrades`（逐笔成交，tick 级回测）、`Market.IndexTicker`。
+
+完整示例见 [examples/backtest](examples/backtest/main.go)。
 
 ## 注意事项
 
