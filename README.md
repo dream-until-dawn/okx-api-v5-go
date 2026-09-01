@@ -65,7 +65,7 @@ func main() {
 | Option | 说明 |
 | --- | --- |
 | `WithCredentials(key, secret, passphrase)` | API 凭证；只调公共接口可省略 |
-| `WithSimulated(true)` | 模拟盘：REST 自动带 `x-simulated-trading: 1`，WS 自动切 `wspap.okx.com` |
+| `WithSimulated(true)` | 模拟盘：REST 自动带 `x-simulated-trading: 1`，WS 自动切 `wspap.okx.com`。**注意它同时会截断公共历史行情**，见下 |
 | `WithRESTURL(u)` | 自定义 REST 地址，如 `okx.AWSRESTURL` |
 | `WithWSURLs(pub, priv, biz)` | 自定义 WebSocket 地址 |
 | `WithWSPort443(true)` | WebSocket 改走 443 端口（见下方「WebSocket 连不上」） |
@@ -364,6 +364,20 @@ marks, _ := client.Market.CandleHistory(ctx, okx.HistoryRequest{
 ```
 
 标记价与指数 K 线**没有成交量**（交易所只返回 6 个字段），`Vol` 恒为 0。
+
+**模拟盘的历史行情被截断，不要用它做回测。** 实测模拟盘（`WithSimulated(true)`）
+的 K 线一律只回溯到 **2022-05-27**，而实盘可回溯到合约上线：
+
+| 合约 | 数据源 | 实盘 | 模拟盘 |
+| --- | --- | --- | --- |
+| ETH-USDT-SWAP | 成交价 | 2467 根，2019-11-30 起 | 1558 根，2022-05-27 起 |
+| ETH-USDT-SWAP | 标记价 | 2435 根，2020-01-01 起 | 1558 根，2022-05-27 起 |
+| BTC-USDT-SWAP | 成交价 | 2469 根，2019-11-28 起 | 1558 根，2022-05-27 起 |
+
+这条容易踩，因为 `x-simulated-trading` 直觉上只该影响交易，不该影响**公共**行情。
+两条序列还在同一点齐断，所以在模拟盘上对比「标记价和成交价谁更深」会得到
+「一样深」的假象——那其实是「一样取不到」。**拉历史数据请用不带 `WithSimulated`
+的客户端**，交易再单独用模拟盘客户端。
 
 **标记价历史比成交价浅。** 实测 OKX 的标记价与指数 K 线一律**不早于 2020-01-01**，
 而成交价 K 线可以回溯到合约上线当天。2020 年之前上线的合约因此存在开头缺口：
