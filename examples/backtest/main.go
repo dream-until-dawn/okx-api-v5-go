@@ -135,6 +135,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("获取资金费率失败: %v", err)
 	}
+	// OKX 的资金费率历史只有约 92 天的滚动窗口，超窗口的部分会被静默丢掉。
+	// 回测跨度更长时直接累加会低估成本，这里显式检查覆盖是否完整。
+	if len(rates) > 0 {
+		covered := time.Since(rates[0].FundingTime.Time()).Hours() / 24
+		if covered < float64(days)-1 {
+			log.Printf("警告: 只拿到 %.0f 天的资金费率，回测跨度 %d 天——超出部分需自行估算",
+				covered, days)
+		}
+	}
 	var cumFunding float64
 	for _, r := range rates {
 		cumFunding += r.FundingRate.Float64()
