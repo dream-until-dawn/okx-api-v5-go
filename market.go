@@ -59,6 +59,13 @@ type Candle struct {
 }
 
 // Time 返回该 K 线的开始时间。
+//
+// 按 Go 的惯例返回**本地时区**的时间（time.UnixMilli 的行为）。格式化成日期时
+// 请留意这一点：同一根 K 线在 UTC+8 与 UTC 机器上会打印出不同的日期。需要固定
+// 口径时显式转换，例如 c.Time().UTC()。
+//
+// 另外，OKX 的日线及以上周期按**港时（UTC+8）对齐**——1D K 线开盘于 UTC 16:00，
+// 即港时 00:00。所以在 UTC 口径下看，OKX 的「某一天」会跨在两个自然日上。
 func (c Candle) Time() time.Time { return time.UnixMilli(c.Ts) }
 
 // rawCandle 对应 OKX 返回的字符串数组形式。

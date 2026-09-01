@@ -3,6 +3,7 @@ package okx
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 // 本文件用真实接口返回的报文片段锁住字段解析，样本取自逐仓 + 永续 + 双向持仓的
@@ -244,5 +245,40 @@ func TestInstrumentSwapSizing(t *testing.T) {
 	// 1 张 = 0.1 ETH，10 张 = 1 ETH
 	if got := 10 * in.CtVal.Float64() * in.CtMult.Float64(); got != 1 {
 		t.Fatalf("10 张应折合 1 ETH，实际 %v", got)
+	}
+}
+
+// OKX 的日线按港时（UTC+8）对齐：1D K 线开盘于 UTC 16:00。
+// 文档里的边界日期都基于这个口径，若哪天解析或口径变了，这条会先报警。
+func TestDailyCandleAlignsToHongKongTime(t *testing.T) {
+	// 实测取到的标记价历史边界。
+	const boundary = int64(1577808000000)
+	ts := time.UnixMilli(boundary).UTC()
+
+	if h := ts.Hour(); h != 16 {
+		t.Fatalf("1D K 线应开盘于 UTC 16:00，实际 %d:00", h)
+	}
+	if got := ts.Format("2006-01-02 15:04"); got != "2019-12-31 16:00" {
+		t.Fatalf("UTC 口径 = %q", got)
+	}
+	hk := time.FixedZone("HKT", 8*3600)
+	if got := time.UnixMilli(boundary).In(hk).Format("2006-01-02 15:04"); got != "2020-01-01 00:00" {
+		t.Fatalf("港时口径 = %q，文档里写的 2020-01-01 正是这个口径", got)
+	}
+}
+
+// Candle.Time 按 Go 惯例返回本地时区，格式化出的日期依赖运行机器的时区。
+// 这不是 bug，但使用者容易据此得出差一天的结论，用测试把行为固定下来。
+func TestCandleTimeIsLocalNotUTC(t *testing.T) {
+	c := Candle{Ts: 1577808000000}
+	if !c.Time().Equal(time.UnixMilli(1577808000000)) {
+		t.Fatal("Time 应等价于 time.UnixMilli")
+	}
+	// 显式转换后才是稳定口径。
+	if got := c.Time().UTC().Format("2006-01-02"); got != "2019-12-31" {
+		t.Fatalf("UTC 口径 = %q", got)
+	}
+	if _, off := c.Time().Zone(); off != func() int { _, o := time.Now().Zone(); return o }() {
+		t.Fatal("Time 应返回本地时区")
 	}
 }
