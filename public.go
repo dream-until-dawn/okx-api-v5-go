@@ -10,26 +10,29 @@ type PublicService struct{ c *Client }
 
 // Instrument 是产品（交易对 / 合约）的基础信息，下单前用来获取下单精度与合约面值。
 type Instrument struct {
-	InstType  string `json:"instType"`
-	InstID    string `json:"instId"`
-	Uly       string `json:"uly"`        // 标的指数，如 ETH-USDT
-	InstFamil string `json:"instFamily"` // 交易品种
-	BaseCcy   string `json:"baseCcy"`    // 交易货币（币对）
-	QuoteCcy  string `json:"quoteCcy"`   // 计价货币（币对）
-	SettleCcy string `json:"settleCcy"`  // 盈亏结算货币（合约）
-	CtVal     Num    `json:"ctVal"`      // 合约面值
-	CtMult    Num    `json:"ctMult"`     // 合约乘数
-	CtValCcy  string `json:"ctValCcy"`   // 合约面值计价货币
-	ListTime  Num    `json:"listTime"`   // 上线时间，毫秒
-	ExpTime   Num    `json:"expTime"`    // 到期时间，毫秒
-	Lever     Num    `json:"lever"`      // 最大杠杆倍数
-	TickSz    Num    `json:"tickSz"`     // 下单价格精度（最小变动价位）
-	LotSz     Num    `json:"lotSz"`      // 下单数量精度
-	MinSz     Num    `json:"minSz"`      // 最小下单数量
-	CtType    string `json:"ctType"`     // linear（正向）/ inverse（反向）
-	State     string `json:"state"`      // live / suspend / preopen / expired
-	MaxLmtSz  Num    `json:"maxLmtSz"`   // 限价单最大委托数量
-	MaxMktSz  Num    `json:"maxMktSz"`   // 市价单最大委托数量
+	InstType string `json:"instType"`
+	InstID   string `json:"instId"`
+	// InstIDCode 是产品的数字编码。REST 用不到，但 WebSocket 下单必须带上；
+	// 注意它在 JSON 里是数字而非字符串，所以类型是 int64 而不是 Num。
+	InstIDCode int64  `json:"instIdCode"`
+	Uly        string `json:"uly"`        // 标的指数，如 ETH-USDT
+	InstFamil  string `json:"instFamily"` // 交易品种
+	BaseCcy    string `json:"baseCcy"`    // 交易货币（币对）
+	QuoteCcy   string `json:"quoteCcy"`   // 计价货币（币对）
+	SettleCcy  string `json:"settleCcy"`  // 盈亏结算货币（合约）
+	CtVal      Num    `json:"ctVal"`      // 合约面值
+	CtMult     Num    `json:"ctMult"`     // 合约乘数
+	CtValCcy   string `json:"ctValCcy"`   // 合约面值计价货币
+	ListTime   Num    `json:"listTime"`   // 上线时间，毫秒
+	ExpTime    Num    `json:"expTime"`    // 到期时间，毫秒
+	Lever      Num    `json:"lever"`      // 最大杠杆倍数
+	TickSz     Num    `json:"tickSz"`     // 下单价格精度（最小变动价位）
+	LotSz      Num    `json:"lotSz"`      // 下单数量精度
+	MinSz      Num    `json:"minSz"`      // 最小下单数量
+	CtType     string `json:"ctType"`     // linear（正向）/ inverse（反向）
+	State      string `json:"state"`      // live / suspend / preopen / expired
+	MaxLmtSz   Num    `json:"maxLmtSz"`   // 限价单最大委托数量
+	MaxMktSz   Num    `json:"maxMktSz"`   // 市价单最大委托数量
 	// 策略委托的数量上限，下 [TradeService.PlaceAlgoOrder] 前应据此校验。
 	MaxTriggerSz Num `json:"maxTriggerSz"` // 计划委托单最大委托数量
 	MaxStopSz    Num `json:"maxStopSz"`    // 止盈止损单最大委托数量

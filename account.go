@@ -372,3 +372,49 @@ func (s *AccountService) TradeFee(ctx context.Context, instType, instID, instFam
 		set("uly", uly)
 	return requestOne[TradeFee](ctx, s.c, http.MethodGet, "/api/v5/account/trade-fee", q.values(), nil, true)
 }
+
+// 逐仓保证金调整方向。
+const (
+	MarginAdd    = "add"    // 增加保证金
+	MarginReduce = "reduce" // 减少保证金
+)
+
+// PositionMarginRequest 是调整逐仓仓位保证金的请求。
+type PositionMarginRequest struct {
+	InstID  string `json:"instId"`              // 必填
+	PosSide string `json:"posSide"`             // 必填，双向持仓传 long / short，单向传 net
+	Type    string `json:"type"`                // 必填，[MarginAdd] 或 [MarginReduce]
+	Amt     Num    `json:"amt"`                 // 必填，调整数量，正数
+	Ccy     string `json:"ccy,omitempty"`       // 保证金币种，仅适用于杠杆逐仓
+	Auto    bool   `json:"auto,omitempty"`      // 是否自动借币还币
+	LoanTr  bool   `json:"loanTrans,omitempty"` // 是否支持借币转入转出
+}
+
+// PositionMarginResult 是保证金调整结果。
+type PositionMarginResult struct {
+	InstID   string `json:"instId"`
+	PosSide  string `json:"posSide"`
+	Amt      Num    `json:"amt"`      // 实际调整数量
+	Type     string `json:"type"`     // add / reduce
+	Ccy      string `json:"ccy"`      // 保证金币种
+	Leverage Num    `json:"leverage"` // 调整后的杠杆倍数
+}
+
+// AdjustPositionMargin 增加或减少逐仓仓位的保证金。
+//
+// 逐仓的风险完全由仓位自带的保证金承担：行情不利时补保证金可以把强平价推远，
+// 是逐仓策略常规的风控手段；行情有利时减保证金可以把浮盈释放回可用余额。
+// 全仓模式下不需要也不支持这个操作。
+//
+// 增加保证金受可用余额限制，减少保证金受维持保证金要求限制——两者都会被
+// 交易所直接拒绝并返回对应的业务错误码，调用方应当检查错误而不是假定成功。
+//
+//	_, err := client.Account.AdjustPositionMargin(ctx, okx.PositionMarginRequest{
+//		InstID:  "ETH-USDT-SWAP",
+//		PosSide: okx.PosSideLong,
+//		Type:    okx.MarginAdd,
+//		Amt:     okx.NumOf(100), // 补 100 USDT
+//	})
+func (s *AccountService) AdjustPositionMargin(ctx context.Context, req PositionMarginRequest) (PositionMarginResult, error) {
+	return requestOne[PositionMarginResult](ctx, s.c, http.MethodPost, "/api/v5/account/position/margin-balance", nil, req, true)
+}

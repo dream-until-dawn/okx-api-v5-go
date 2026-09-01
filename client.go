@@ -25,6 +25,9 @@ type Client struct {
 	Market *MarketService
 	// Public 公共数据接口（/api/v5/public/*，公开）。
 	Public *PublicService
+
+	// instCodes 缓存 WebSocket 下单所需的 instIdCode，见 instcode.go。
+	instCodes *instCodeCache
 }
 
 // NewClient 创建客户端。不传 [WithCredentials] 时只能调用公共接口。
@@ -73,7 +76,7 @@ func NewClient(opts ...Option) (*Client, error) {
 		hc = &http.Client{Timeout: o.timeout, Transport: transport}
 	}
 
-	c := &Client{opt: o, http: hc}
+	c := &Client{opt: o, http: hc, instCodes: newInstCodeCache()}
 	c.Account = &AccountService{c: c}
 	c.Trade = &TradeService{c: c}
 	c.Market = &MarketService{c: c}

@@ -152,7 +152,20 @@ func WithLogger(l Logger) Option {
 }
 
 // WithLimiter 注入限流器，每次 REST 请求前会调用 Wait。
+// 想直接用内置实现时用 [WithRateLimit]，接自己的限流器（如
+// golang.org/x/time/rate.Limiter）时用这个。
 func WithLimiter(l Limiter) Option { return func(o *options) { o.limiter = l } }
+
+// WithRateLimit 启用内置的令牌桶限流，等价于 WithLimiter(NewLimiter(rps, burst))。
+//
+// SDK 默认**不限流**：OKX 按接口分组限频，额度各不相同，由 SDK 猜一个统一值
+// 反而容易既拖慢正常调用又挡不住真正超限的接口。批量拉历史数据或高频轮询时
+// 建议显式打开，例如：
+//
+//	okx.NewClient(okx.WithRateLimit(8, 16)) // 稳态 8 次/秒，可突发 16 次
+func WithRateLimit(ratePerSec float64, burst int) Option {
+	return func(o *options) { o.limiter = NewLimiter(ratePerSec, burst) }
+}
 
 // WithWSPort443 让 WebSocket 走 443 端口而非默认的 8443。
 //

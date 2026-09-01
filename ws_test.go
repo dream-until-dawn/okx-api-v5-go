@@ -3,10 +3,12 @@ package okx
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,7 +20,10 @@ import (
 type fakeOKX struct {
 	*httptest.Server
 
-	mu        sync.Mutex
+	mu sync.Mutex
+	// writeMu 单独保护写操作：gorilla/websocket 不允许并发写，
+	// 而交易应答是在独立 goroutine 里发出的（为了模拟延迟与乱序）。
+	writeMu   sync.Mutex
 	conn      *websocket.Conn
 	logins    []wsLoginArg
 	subscribe []Arg
@@ -26,6 +31,13 @@ type fakeOKX struct {
 
 	connected  chan struct{} // 每建立一条连接推送一次
 	subscribed chan Arg      // 每收到一次订阅推送一次
+
+	// 交易 op 的仿真行为
+	tradeDelay time.Duration // 应答前的延迟，用来验证并发关联
+	tradeCode  string        // 顶层 code，留空为 "0"
+	tradeSCode string        // 单条 sCode，留空为 "0"
+	tradeOps   int64         // 收到的交易请求数
+	lastOrder  atomic.Value  // 最近一次 order 请求的原始 args
 }
 
 func newFakeOKX(t *testing.T) *fakeOKX {
@@ -86,6 +98,38 @@ func (f *fakeOKX) serve(conn *websocket.Conn) {
 			f.logins = append(f.logins, arg)
 			f.mu.Unlock()
 			_ = f.writeJSON(map[string]string{"event": "login", "code": "0", "msg": "", "connId": "abc"})
+		case wsOpOrder, wsOpBatchOrders, wsOpCancelOrder, wsOpBatchCancel, wsOpAmendOrder, wsOpBatchAmend:
+			atomic.AddInt64(&f.tradeOps, 1)
+			if op.Op == wsOpOrder && len(op.Args) > 0 {
+				f.lastOrder.Store(string(op.Args[0]))
+			}
+			var req struct {
+				ID string `json:"id"`
+			}
+			_ = json.Unmarshal(data, &req)
+			code, sCode := f.tradeCode, f.tradeSCode
+			if code == "" {
+				code = "0"
+			}
+			if sCode == "" {
+				sCode = "0"
+			}
+			// 每条 arg 回一条结果，ordId 里带上请求 id 便于断言没有串号。
+			items := make([]map[string]string, 0, len(op.Args))
+			for i := range op.Args {
+				items = append(items, map[string]string{
+					"ordId": fmt.Sprintf("ord-%s-%d", req.ID, i),
+					"sCode": sCode, "sMsg": "",
+				})
+			}
+			go func(id string, items []map[string]string, code string) {
+				if f.tradeDelay > 0 {
+					time.Sleep(f.tradeDelay)
+				}
+				_ = f.writeJSON(map[string]any{
+					"id": id, "op": op.Op, "code": code, "msg": "", "data": items,
+				})
+			}(req.ID, items, code)
 		case "subscribe":
 			for _, raw := range op.Args {
 				var a Arg
@@ -112,6 +156,8 @@ func (f *fakeOKX) write(mt int, data []byte) error {
 	if conn == nil {
 		return websocket.ErrCloseSent
 	}
+	f.writeMu.Lock()
+	defer f.writeMu.Unlock()
 	return conn.WriteMessage(mt, data)
 }
 

@@ -127,6 +127,9 @@ type WS struct {
 
 	loginCh chan error // 等待登录结果
 
+	// pending 关联已发出的 WS 交易请求与其应答（见 ws_trade.go）。
+	pending *pendingCalls
+
 	onEvent      func(WSEvent)
 	onError      func(error)
 	onConnect    func()
@@ -152,6 +155,7 @@ func (c *Client) newWS(ep WSEndpoint, u string) *WS {
 		endpoint: ep,
 		url:      u,
 		subs:     make(map[string]*subscription),
+		pending:  newPendingCalls(),
 		done:     make(chan struct{}),
 	}
 }
@@ -279,6 +283,9 @@ func (w *WS) runConnection(ctx context.Context) error {
 	readErr := make(chan error, 1)
 	go func() { readErr <- w.readLoop(conn) }()
 
+	// 这条连接结束时，让所有还在等应答的交易请求立刻失败，而不是挂到超时。
+	defer w.pending.failAll()
+
 	// 公共 / 业务频道无需登录，连上就可以订阅；私有频道等 login 成功。
 	if w.endpoint != EndpointPrivate {
 		w.afterReady()
@@ -366,12 +373,28 @@ func (w *WS) readLoop(conn *websocket.Conn) error {
 		}
 
 		var probe struct {
+			ID    string          `json:"id"`
+			Op    string          `json:"op"`
 			Event string          `json:"event"`
 			Arg   Arg             `json:"arg"`
 			Data  json.RawMessage `json:"data"`
 		}
 		if err := json.Unmarshal(data, &probe); err != nil {
 			w.reportError(fmt.Errorf("okx: decode ws message %s: %w", truncate(string(data), 256), err))
+			continue
+		}
+
+		// 交易应答带 id，先按 id 交还给等待中的调用方。
+		// 这类报文既没有 arg 也未必有 event，不先挑出来会被当成无人认领的推送。
+		if probe.ID != "" {
+			var resp wsTradeResponse
+			if err := json.Unmarshal(data, &resp); err != nil {
+				w.reportError(fmt.Errorf("okx: decode ws trade reply: %w", err))
+				continue
+			}
+			if !w.pending.resolve(resp.ID, &resp) {
+				w.c.opt.logger.Debugf("okx: ws reply for unknown id %s: %s", resp.ID, truncate(string(data), 200))
+			}
 			continue
 		}
 
@@ -562,6 +585,7 @@ func (w *WS) Close() error {
 		if conn != nil {
 			err = conn.Close()
 		}
+		w.pending.failAll()
 	})
 	return err
 }

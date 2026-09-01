@@ -3,6 +3,7 @@ package okx
 import (
 	"context"
 	"net/http"
+	"strconv"
 )
 
 // TradeService 封装 /api/v5/trade/* 交易接口，全部需要签名。
@@ -56,6 +57,10 @@ type OrderRequest struct {
 	Px      Num    `json:"px,omitempty"`      // 限价单必填
 	PosSide string `json:"posSide,omitempty"` // 双向持仓模式下的合约交易必填：long / short
 	Ccy     string `json:"ccy,omitempty"`     // 保证金币种，仅用于单币种保证金模式的全仓杠杆
+
+	// InstIDCode 仅 WebSocket 下单需要。留 0 时 [WS.PlaceOrder] 会自动解析并缓存，
+	// REST 下单会忽略它。
+	InstIDCode int64 `json:"instIdCode,omitempty"`
 
 	ClOrdID string `json:"clOrdId,omitempty"` // 客户自定义订单 ID，字母数字，1-32 位
 	Tag     string `json:"tag,omitempty"`     // 订单标签；留空时使用 WithBrokerTag 配置的默认值
@@ -114,9 +119,11 @@ func (s *TradeService) PlaceOrders(ctx context.Context, reqs []OrderRequest) ([]
 
 // CancelOrderRequest 是撤单请求，OrdID 与 ClOrdID 至少填一个。
 type CancelOrderRequest struct {
-	InstID  string `json:"instId"`
-	OrdID   string `json:"ordId,omitempty"`
-	ClOrdID string `json:"clOrdId,omitempty"`
+	InstID string `json:"instId"`
+	// InstIDCode 仅 WebSocket 撤单可能需要；留 0 时由 [WS.CancelOrder] 自动补齐。
+	InstIDCode int64  `json:"instIdCode,omitempty"`
+	OrdID      string `json:"ordId,omitempty"`
+	ClOrdID    string `json:"clOrdId,omitempty"`
 }
 
 // CancelOrder 撤销单个订单。
@@ -132,13 +139,15 @@ func (s *TradeService) CancelOrders(ctx context.Context, reqs []CancelOrderReque
 // AmendOrderRequest 是改单请求。OrdID 与 ClOrdID 至少填一个，
 // NewSz 与 NewPx 至少填一个。
 type AmendOrderRequest struct {
-	InstID    string `json:"instId"`
-	OrdID     string `json:"ordId,omitempty"`
-	ClOrdID   string `json:"clOrdId,omitempty"`
-	ReqID     string `json:"reqId,omitempty"`     // 用户自定义的修改事件 ID
-	NewSz     Num    `json:"newSz,omitempty"`     // 修改后的数量
-	NewPx     Num    `json:"newPx,omitempty"`     // 修改后的价格
-	CxlOnFail bool   `json:"cxlOnFail,omitempty"` // 修改失败时是否自动撤单
+	InstID string `json:"instId"`
+	// InstIDCode 仅 WebSocket 改单可能需要；留 0 时由 [WS.AmendOrder] 自动补齐。
+	InstIDCode int64  `json:"instIdCode,omitempty"`
+	OrdID      string `json:"ordId,omitempty"`
+	ClOrdID    string `json:"clOrdId,omitempty"`
+	ReqID      string `json:"reqId,omitempty"`     // 用户自定义的修改事件 ID
+	NewSz      Num    `json:"newSz,omitempty"`     // 修改后的数量
+	NewPx      Num    `json:"newPx,omitempty"`     // 修改后的价格
+	CxlOnFail  bool   `json:"cxlOnFail,omitempty"` // 修改失败时是否自动撤单
 }
 
 // AmendOrder 修改未成交的订单。
@@ -419,4 +428,43 @@ func (s *TradeService) AlgoOrdersHistory(ctx context.Context, instType, instID, 
 		set("algoId", algoID).
 		setInt("limit", limit)
 	return request[AlgoOrder](ctx, s.c, http.MethodGet, "/api/v5/trade/orders-algo-history", q.values(), nil, true)
+}
+
+// CancelAllAfterResult 是断线自动撤单的设置结果。
+type CancelAllAfterResult struct {
+	// TriggerTime 是本次设置的触发时刻（毫秒）。取消倒计时时返回 "0"。
+	TriggerTime Num `json:"triggerTime"`
+	Ts          Num `json:"ts"`
+}
+
+// CancelAllAfter 设置「断线自动撤单」倒计时，是程序化交易的保命开关。
+//
+// 调用后交易所开始倒计时，到点会**撤销该账户下的全部挂单**。策略需要在倒计时
+// 结束前反复调用来续期（心跳式），一旦进程崩溃、断网或卡死而停止续期，
+// 交易所就会替你把挂单清掉，避免无人看管的挂单在行情剧变中被打穿。
+//
+// timeout 单位为秒，取值 0 或 10~120：传 0 表示**取消**当前倒计时。
+// 建议的续期节奏是取倒计时的三分之一到二分之一，例如设 60 秒、每 20 秒续一次。
+//
+//	// 启动保护
+//	go func() {
+//		t := time.NewTicker(20 * time.Second)
+//		defer t.Stop()
+//		for {
+//			if _, err := client.Trade.CancelAllAfter(ctx, 60); err != nil {
+//				log.Println("续期失败:", err) // 续不上就会被交易所兜底撤单
+//			}
+//			select {
+//			case <-ctx.Done():
+//				client.Trade.CancelAllAfter(context.Background(), 0) // 正常退出时取消
+//				return
+//			case <-t.C:
+//			}
+//		}
+//	}()
+//
+// 注意这是**账户级**开关，会影响该账户的所有挂单，不区分产品。
+func (s *TradeService) CancelAllAfter(ctx context.Context, timeout int) (CancelAllAfterResult, error) {
+	body := map[string]string{"timeOut": strconv.Itoa(timeout)}
+	return requestOne[CancelAllAfterResult](ctx, s.c, http.MethodPost, "/api/v5/trade/cancel-all-after", nil, body, true)
 }

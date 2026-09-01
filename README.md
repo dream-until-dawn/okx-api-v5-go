@@ -54,7 +54,9 @@ func main() {
 }
 ```
 
-完整示例见 [examples/rest](examples/rest/main.go) 与 [examples/ws](examples/ws/main.go)。
+完整示例见 [examples/rest](examples/rest/main.go)、[examples/ws](examples/ws/main.go) 与 [examples/backtest](examples/backtest/main.go)。
+
+能力范围、已验证程度与已知风险见 [docs/scope.md](docs/scope.md)。
 
 ## 配置
 
@@ -73,7 +75,8 @@ func main() {
 | `WithHTTPClient(hc)` | 直接复用项目已有的 `*http.Client` |
 | `WithBrokerTag(tag)` | 下单默认 tag（经纪商返佣标识） |
 | `WithLogger(l)` | 注入日志实现，默认静默 |
-| `WithLimiter(l)` | 注入限流器，接口与 `golang.org/x/time/rate.Limiter` 兼容 |
+| `WithRateLimit(rps, burst)` | 启用内置令牌桶限流（默认不限流） |
+| `WithLimiter(l)` | 注入自己的限流器，接口与 `golang.org/x/time/rate.Limiter` 兼容 |
 | `WithWSReconnectDelay(d)` / `WithWSPingInterval(d)` | WS 重连间隔与心跳间隔 |
 
 ## 数值类型
@@ -95,9 +98,9 @@ okx.NumOf(1.5)     // 由 float64 构造，用于下单参数
 
 **公共数据 `client.Public`**：`Instruments` / `Instrument` / `MarkPrices` / `FundingRate` / `FundingRateHistory` / `FundingRateHistoryAll` / `PositionTiers` / `OpenInterests` / `PriceLimit` / `ServerTime`
 
-**账户 `client.Account`**：`Balance` / `Positions` / `PositionsHistory` / `Config` / `LeverageInfo` / `SetLeverage` / `MaxSize` / `MaxAvailSize` / `SetPositionMode` / `Bills` / `TradeFee`
+**账户 `client.Account`**：`Balance` / `Positions` / `PositionsHistory` / `Config` / `LeverageInfo` / `SetLeverage` / `MaxSize` / `MaxAvailSize` / `SetPositionMode` / `Bills` / `TradeFee` / `AdjustPositionMargin`
 
-**交易 `client.Trade`**：`PlaceOrder` / `PlaceOrders` / `CancelOrder` / `CancelOrders` / `AmendOrder` / `ClosePosition` / `Order` / `PendingOrders` / `OrdersHistory` / `OrdersHistoryArchive` / `Fills` / `FillsHistory` / `PlaceAlgoOrder` / `CancelAlgoOrders` / `PendingAlgoOrders` / `AlgoOrdersHistory`
+**交易 `client.Trade`**：`PlaceOrder` / `PlaceOrders` / `CancelOrder` / `CancelOrders` / `AmendOrder` / `ClosePosition` / `Order` / `PendingOrders` / `OrdersHistory` / `OrdersHistoryArchive` / `Fills` / `FillsHistory` / `PlaceAlgoOrder` / `CancelAlgoOrders` / `PendingAlgoOrders` / `AlgoOrdersHistory` / `CancelAllAfter`
 
 没封装的接口可以直接用泛型的 `Do`：
 
@@ -177,6 +180,43 @@ okx.SubscribeTyped(ws, okx.Arg{Channel: "liquidation-orders", InstType: "SWAP"},
 ```
 
 Handler 在读循环里被**同步**调用，耗时逻辑请自行投递到别的 goroutine，避免阻塞后续消息。
+
+### WebSocket 下单
+
+私有连接支持直接下单，省去每次 REST 调用的请求构造与签名开销：
+
+```go
+ws := client.NewPrivateWS()
+defer ws.Close()
+ws.OnConnect(func() { log.Println("已登录，可以下单") })
+if err := ws.Connect(ctx); err != nil {
+	log.Fatal(err)
+}
+
+res, err := ws.PlaceOrder(ctx, okx.OrderRequest{
+	InstID: "ETH-USDT-SWAP", TdMode: okx.TdModeIsolated,
+	Side: okx.SideBuy, PosSide: okx.PosSideLong,
+	OrdType: okx.OrdTypeLimit, Sz: "1", Px: okx.NumOf(2400),
+})
+```
+
+参数、返回和错误语义与 `client.Trade.PlaceOrder` 完全一致，另有
+`PlaceOrders` / `CancelOrder` / `CancelOrders` / `AmendOrder` / `AmendOrders`。
+并发调用是安全的，SDK 按请求 id 关联应答，不会串号。
+
+**关于延迟：** WS 下单省掉的是 REST 每次请求的签名与报文构造，不是网络往返。
+在跨境链路上往返时延占绝对大头——实测同一环境下 WS 与 REST 下单往返分别是
+354ms 和 362ms，**几乎没有差别**。真正的收益出现在低延迟链路（同区域机房）
+或高频场景下，不要指望它能抵消地理距离。
+
+**instIdCode：** OKX 的 WS 下单要求带产品数字编码。SDK 会自动解析并缓存，
+但首次用到某个产品时会触发一次 REST 查询。对延迟敏感的策略请在启动时预热：
+
+```go
+if err := client.PreloadInstrumentCodes(ctx, "SWAP"); err != nil {
+	log.Fatal(err)
+}
+```
 
 ## 错误处理
 
@@ -375,6 +415,50 @@ rates, _ := client.Public.FundingRateHistoryAll(ctx, "ETH-USDT-SWAP",
 `Market.HistoryTrades`（逐笔成交，tick 级回测）、`Market.IndexTicker`。
 
 完整示例见 [examples/backtest](examples/backtest/main.go)。
+
+## 实盘防护
+
+### 断线自动撤单
+
+程序崩溃、断网或卡死时，挂单会失去看管。`CancelAllAfter` 让交易所在倒计时结束后
+**撤销该账户的全部挂单**——策略需要持续续期，一旦停止续期就自动兜底：
+
+```go
+go func() {
+	t := time.NewTicker(20 * time.Second) // 续期节奏取倒计时的 1/3
+	defer t.Stop()
+	for {
+		if _, err := client.Trade.CancelAllAfter(ctx, 60); err != nil {
+			log.Println("续期失败:", err)
+		}
+		select {
+		case <-ctx.Done():
+			client.Trade.CancelAllAfter(context.Background(), 0) // 正常退出时解除
+			return
+		case <-t.C:
+		}
+	}
+}()
+```
+
+这是**账户级**开关，会影响该账户的所有挂单，不区分产品。传 `0` 取消倒计时。
+
+### 逐仓补减保证金
+
+逐仓的风险完全由仓位自带的保证金承担。行情不利时补保证金可以把强平价推远，
+是逐仓策略的常规风控手段（全仓不需要也不支持）：
+
+```go
+_, err := client.Account.AdjustPositionMargin(ctx, okx.PositionMarginRequest{
+	InstID:  "ETH-USDT-SWAP",
+	PosSide: okx.PosSideLong,
+	Type:    okx.MarginAdd, // 或 okx.MarginReduce
+	Amt:     okx.NumOf(100),
+})
+```
+
+减保证金受维持保证金要求限制，交易所会直接拒绝（`59301`）——实测中即使只减
+1% 也可能被拒，**务必检查返回的错误，不要假定成功**。
 
 ## 注意事项
 
